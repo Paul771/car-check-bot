@@ -41,6 +41,9 @@ def main():
     application = (
         ApplicationBuilder()
         .token(config.bot_token)
+        .http_version("1.1")
+        .connect_timeout(30)
+        .read_timeout(30)
         .build()
     )
 
