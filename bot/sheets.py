@@ -26,7 +26,8 @@ def _get_sheet_gid(sheet_name: str) -> int:
 def fetch_sheet_csv(config: Config) -> str:
     """
     Fetch the entire Google Sheet as CSV via public export URL.
-    Returns raw CSV text.
+    Returns raw CSV text. Uses direct connection (bypasses system proxy)
+    to avoid corporate proxy issues.
     """
     gid = _get_sheet_gid(config.sheet_name)
     url = (
@@ -36,7 +37,10 @@ def fetch_sheet_csv(config: Config) -> str:
 
     logger.info(f"Fetching sheet data from: {url}")
     try:
-        with urllib.request.urlopen(url, timeout=30) as response:
+        # Create an opener with empty ProxyHandler to bypass system proxy
+        proxy_handler = urllib.request.ProxyHandler({})
+        opener = urllib.request.build_opener(proxy_handler)
+        with opener.open(url, timeout=30) as response:
             csv_text = response.read().decode("utf-8")
             return csv_text
     except urllib.error.URLError as e:
