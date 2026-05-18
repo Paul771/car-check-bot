@@ -1,0 +1,11 @@
+services:
+  car-check-bot:
+    build: .
+    container_name: car-check-bot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - TARGET_GROUP_ID=${TARGET_GROUP_ID}
+      - GOOGLE_SHEET_ID=${GOOGLE_SHEET_ID}
+      - SHEET_NAME=${SHEET_NAME}
+      - COLUMN_INDEX=${COLUMN_INDEX}
