@@ -27,7 +27,12 @@ class PlateCache:
         logger.info(f"Cache refreshed: {len(self._plates)} plates loaded.")
 
     def is_known(self, plate: str) -> bool:
-        """Check if a plate number is in the database (with normalized comparison)."""
+        """Check if a plate number is in the database (with normalized comparison).
+
+        Supports two modes:
+        - Full match (9+ chars): exact match of the full plate
+        - Short match (6 chars): match by first 6 characters
+        """
         if time.time() - self._last_update > self.cache_ttl:
             self._refresh()
 
@@ -35,7 +40,13 @@ class PlateCache:
         if not normalized:
             return False
 
-        return normalized in self._plates
+        if len(normalized) >= 8:
+            # Full match (8-9 chars): exact match of the full plate
+            return normalized in self._plates
+        elif len(normalized) == 6:
+            # Short match (6 chars): match by first 6 characters
+            return any(p.startswith(normalized) for p in self._plates)
+        return False
 
     def get_plate_count(self) -> int:
         """Return the number of cached plates."""
