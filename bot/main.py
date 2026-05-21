@@ -31,8 +31,11 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
 
-def run_bot():
-    """Start the bot with polling. Returns the exit code."""
+async def run_bot_async() -> int:
+    """
+    Start the bot with polling using manual lifecycle management.
+    Returns 0 on clean stop, 2 on crash/network error.
+    """
     logger.info("Loading configuration...")
     config = load_config()
 
@@ -70,25 +73,60 @@ def run_bot():
     logger.info("Registering handlers...")
     register_handlers(application, plate_cache, config.target_group_id)
 
-    logger.info("Starting bot polling...")
+    logger.info("Starting bot polling manually...")
     try:
-        application.run_polling(
-            close_loop=False,  # Keep the event loop alive for retry
+        # Manual lifecycle to properly catch polling errors
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(
+            bootstrap_retries=0,
+            drop_pending_updates=False,
         )
+
+        # Keep running until an error occurs or we are stopped
+        # We use an Event to wait, and check if the updater is still running periodically
+        stop_event = asyncio.Event()
+
+        while True:
+            # Check if updater is still alive every 5 seconds
+            try:
+                await asyncio.wait_for(
+                    asyncio.create_task(stop_event.wait()),
+                    timeout=5.0,
+                )
+                # stop_event was set — clean shutdown requested
+                break
+            except asyncio.TimeoutError:
+                pass
+
+            if not application.updater.running:
+                logger.error("Updater stopped unexpectedly!")
+                break
+
+        return 0
+
+    except asyncio.CancelledError:
+        logger.info("Bot was cancelled.")
+        return 0
     except Exception as e:
         logger.error(f"Bot polling exited with error: {e}", exc_info=True)
         return 2
+    finally:
+        try:
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
+        except Exception as cleanup_err:
+            logger.warning(f"Cleanup error (non-fatal): {cleanup_err}")
 
-    return 0
 
-
-def main():
-    """Entry point with automatic restart on failure."""
+async def main_async():
+    """Main async entry point with automatic restart on failure."""
     attempt = 0
 
     while True:
         logger.info(f"Starting bot (attempt {attempt + 1})...")
-        exit_code = run_bot()
+        exit_code = await run_bot_async()
 
         if exit_code in (0, 1):
             # 0 = clean exit, 1 = configuration error — do not restart
@@ -98,8 +136,24 @@ def main():
         # exit_code 2 = crash / network error — restart with backoff
         delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)]
         logger.info(f"Bot will restart in {delay} seconds...")
-        time.sleep(delay)
+        await asyncio.sleep(delay)
         attempt += 1
+
+
+def main():
+    """Entry point that creates a new event loop for each run."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main_async())
+    except KeyboardInterrupt:
+        logger.info("Received KeyboardInterrupt. Exiting.")
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        loop.close()
 
 
 if __name__ == "__main__":
