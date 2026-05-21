@@ -1,7 +1,7 @@
 import os
-import time
 import asyncio
 import logging
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 from telegram import Update
@@ -24,6 +24,22 @@ logger = logging.getLogger(__name__)
 
 # Retry delays between restart attempts (seconds)
 RETRY_DELAYS = [5, 15, 30, 60, 120]
+
+# If no successful update poll for this many seconds, assume the bot is stuck
+MAX_IDLE_SECONDS = 120
+
+
+class LastUpdateTracker:
+    """Tracks the timestamp of the last successful update poll."""
+
+    def __init__(self):
+        self._last_update_time: datetime = datetime.now(timezone.utc)
+
+    def mark_update(self):
+        self._last_update_time = datetime.now(timezone.utc)
+
+    def seconds_since_last_update(self) -> float:
+        return (datetime.now(timezone.utc) - self._last_update_time).total_seconds()
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -73,9 +89,20 @@ async def run_bot_async() -> int:
     logger.info("Registering handlers...")
     register_handlers(application, plate_cache, config.target_group_id)
 
+    update_tracker = LastUpdateTracker()
+
+    # Patch the updater to track successful polls
+    original_process_updates = application.updater._process_updates
+
+    async def patched_process_updates(updates):
+        if updates:
+            update_tracker.mark_update()
+        return await original_process_updates(updates)
+
+    application.updater._process_updates = patched_process_updates
+
     logger.info("Starting bot polling manually...")
     try:
-        # Manual lifecycle to properly catch polling errors
         await application.initialize()
         await application.start()
         await application.updater.start_polling(
@@ -83,27 +110,26 @@ async def run_bot_async() -> int:
             drop_pending_updates=False,
         )
 
-        # Keep running until an error occurs or we are stopped
-        # We use an Event to wait, and check if the updater is still running periodically
-        stop_event = asyncio.Event()
+        logger.info("Bot is running. Monitoring for stuck connections...")
 
         while True:
-            # Check if updater is still alive every 5 seconds
-            try:
-                await asyncio.wait_for(
-                    asyncio.create_task(stop_event.wait()),
-                    timeout=5.0,
-                )
-                # stop_event was set — clean shutdown requested
-                break
-            except asyncio.TimeoutError:
-                pass
+            await asyncio.sleep(10.0)
 
+            # Check if updater stopped
             if not application.updater.running:
                 logger.error("Updater stopped unexpectedly!")
                 break
 
-        return 0
+            # Check if we haven't received updates for too long
+            idle_seconds = update_tracker.seconds_since_last_update()
+            if idle_seconds > MAX_IDLE_SECONDS:
+                logger.error(
+                    f"No updates received for {idle_seconds:.0f} seconds "
+                    f"(limit: {MAX_IDLE_SECONDS}s). Assuming connection is stuck. Restarting..."
+                )
+                break
+
+        return 2  # Signal restart needed
 
     except asyncio.CancelledError:
         logger.info("Bot was cancelled.")
