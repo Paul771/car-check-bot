@@ -1,4 +1,6 @@
 import os
+from telegram.request import HTTPXRequest
+# Disable any system proxy for all outbound HTTP (Telegram API, Google Sheet)
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -14,6 +16,10 @@ from bot.handlers import register_handlers
 
 # Load .env from project root
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+os.environ.setdefault('NO_PROXY', '*')
+# Ensure no proxy interferes with Telegram API calls
+for var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]:
+    os.environ.pop(var, None)
 
 # Setup logging
 logging.basicConfig(
@@ -69,7 +75,7 @@ async def run_bot_async() -> int:
     logger.info(f"Loaded {plate_count} plate numbers into cache.")
 
     logger.info("Building Telegram application...")
-    application = (
+    builder = (
         ApplicationBuilder()
         .token(config.bot_token)
         .http_version("1.1")
@@ -80,26 +86,17 @@ async def run_bot_async() -> int:
         .get_updates_connect_timeout(30.0)
         .get_updates_read_timeout(30.0)
         .get_updates_pool_timeout(30.0)
-        .build()
     )
+    proxy_url = os.getenv("PROXY_URL")
+    if proxy_url:
+        builder = builder.request(HTTPXRequest(proxy_url=proxy_url))
+    application = builder.build()
 
     # Register global error handler so the bot doesn't crash on network errors
     application.add_error_handler(error_handler)
 
     logger.info("Registering handlers...")
     register_handlers(application, plate_cache, config.target_group_id)
-
-    update_tracker = LastUpdateTracker()
-
-    # Patch the updater to track successful polls
-    original_process_updates = application.updater._process_updates
-
-    async def patched_process_updates(updates):
-        if updates:
-            update_tracker.mark_update()
-        return await original_process_updates(updates)
-
-    application.updater._process_updates = patched_process_updates
 
     logger.info("Starting bot polling manually...")
     try:
@@ -110,24 +107,34 @@ async def run_bot_async() -> int:
             drop_pending_updates=False,
         )
 
-        logger.info("Bot is running. Monitoring for stuck connections...")
+        logger.info("Bot is running. Monitoring health...")
+
+        consecutive_check_failures = 0
+        max_check_failures = 3
 
         while True:
-            await asyncio.sleep(10.0)
+            await asyncio.sleep(30.0)
 
             # Check if updater stopped
             if not application.updater.running:
                 logger.error("Updater stopped unexpectedly!")
-                break
+                return 2
 
-            # Check if we haven't received updates for too long
-            idle_seconds = update_tracker.seconds_since_last_update()
-            if idle_seconds > MAX_IDLE_SECONDS:
-                logger.error(
-                    f"No updates received for {idle_seconds:.0f} seconds "
-                    f"(limit: {MAX_IDLE_SECONDS}s). Assuming connection is stuck. Restarting..."
+            # Health check: try to call get_me() to verify the connection
+            try:
+                await application.bot.get_me()
+                consecutive_check_failures = 0
+            except Exception as e:
+                consecutive_check_failures += 1
+                logger.warning(
+                    f"Health check {consecutive_check_failures}/{max_check_failures} failed: {e}"
                 )
-                break
+                if consecutive_check_failures >= max_check_failures:
+                    logger.error(
+                        f"Health check failed {consecutive_check_failures} times in a row. "
+                        "Assuming connection is lost. Restarting..."
+                    )
+                    return 2
 
         return 2  # Signal restart needed
 
