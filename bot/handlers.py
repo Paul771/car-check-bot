@@ -1,12 +1,15 @@
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
+    ConversationHandler,
     filters,
     ContextTypes,
 )
 from bot.utils import PlateCache
 from bot.sheets import normalize_plate
+from bot.plate_recognizer import detect_plate
 
 
 # Constants / Messages
@@ -46,6 +49,13 @@ MSG_SENT_ADMIN = "Текстовое сообщение передано в гр
 MSG_SEND_ADMIN_PROMPT = "Напишите текст сообщения для отправки в группу разбора:"
 MSG_PLATE_COUNT = "В базе данных {count} номеров."
 
+# Conversation states
+CONFIRMING_PLATE, ENTERING_PLATE, CONFIRMING_SEND = range(3)
+
+# Confidence thresholds
+HIGH_CONFIDENCE = 0.8
+LOW_CONFIDENCE = 0.3
+
 
 def _resolve_user_identifier(update: Update) -> str:
     """Get user identifier: username if available, else first/last name, else ID."""
@@ -59,16 +69,61 @@ def _resolve_user_identifier(update: Update) -> str:
         return f"User {user.id}"
 
 
+def _confirm_plate_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_plate"),
+         InlineKeyboardButton("❌ Исправить", callback_data="wrong_plate")]
+    ])
+
+
+def _send_to_admin_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Отправить", callback_data="confirm_send"),
+         InlineKeyboardButton("❌ Отмена", callback_data="cancel_send")]
+    ])
+
+
+def _no_detection_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Ввести номер", callback_data="enter_plate"),
+         InlineKeyboardButton("❌ Отмена", callback_data="cancel_no_plate")]
+    ])
+
+
 def register_handlers(
     application,
     plate_cache: PlateCache,
     target_group_id: int,
+    config,
 ):
     """Register all message handlers with the application."""
 
     def is_private_chat(update: Update) -> bool:
         """Check if the message is from a private chat (not a group)."""
         return update.effective_chat and update.effective_chat.type == "private"
+
+    async def _process_plate(
+        update: Update, context: ContextTypes.DEFAULT_TYPE, plate: str
+    ) -> int:
+        """Search plate in DB, reply 'found' or ask 'send to admin?'."""
+        normalized = normalize_plate(plate)
+        if not normalized:
+            await update.effective_message.reply_text("Некорректный номер.")
+            return ConversationHandler.END
+
+        if plate_cache.is_known(normalized):
+            await update.effective_message.reply_text(
+                f"✅ Номер {plate} найден в базе данных!"
+            )
+            return ConversationHandler.END
+
+        context.user_data["send_plate"] = plate
+        await update.effective_message.reply_text(
+            f"❌ Номер {plate} не найден в базе.\n\n"
+            f"Отправить фото в группу разбора?",
+            reply_markup=_send_to_admin_keyboard(),
+        )
+        return CONFIRMING_SEND
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_private_chat(update):
@@ -168,29 +223,125 @@ def register_handlers(
                 MSG_NOT_FOUND.format(plate=user_text)
             )
 
-    async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """
-        Forward the photo + caption (if any) to the target group,
-        prepending the sender's username/ID to avoid spam.
-        Then reply to the user.
-        Only works in private chats.
-        """
+    async def handle_photo_detection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Entry point for photo messages. Detect plate, branch by confidence."""
         if not is_private_chat(update):
-            return
+            return ConversationHandler.END
+
         message = update.message
+        photo_file = message.photo[-1]
+
+        # Download photo bytes
+        file = await context.bot.get_file(photo_file.file_id)
+        image_bytes = await file.download_as_bytearray()
+
+        # Store metadata for later forwarding
+        context.user_data["photo_file_id"] = photo_file.file_id
+        context.user_data["original_chat_id"] = update.effective_chat.id
+        context.user_data["original_message_id"] = message.message_id
+
+        results = await detect_plate(
+            bytes(image_bytes), config.plate_recognizer_token
+        )
+
+        if results is None:
+            await message.reply_text(
+                "Сервис распознавания временно недоступен. "
+                "Попробуйте позже или используйте /send_admin."
+            )
+            return ConversationHandler.END
+
+        if not results:
+            await message.reply_text(
+                "Не удалось распознать номер на фото.",
+                reply_markup=_no_detection_keyboard(),
+            )
+            return ENTERING_PLATE
+
+        result = results[0]
+        plate = result.get("plate", "")
+        confidence = result.get("confidence", 0.0)
+
+        if confidence >= HIGH_CONFIDENCE:
+            return await _process_plate(update, context, plate)
+
+        context.user_data["detected_plate"] = plate
+        await message.reply_text(
+            f"Похоже на номер: {plate} (уверенность: {confidence:.0%})\n"
+            f"Подтвердите или введите правильный номер:",
+            reply_markup=_confirm_plate_keyboard(),
+        )
+        return CONFIRMING_PLATE
+
+    async def handle_plate_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """User confirms the detected plate is correct."""
+        query = update.callback_query
+        await query.answer()
+        plate = context.user_data.get("detected_plate", "")
+        await query.edit_message_text(f"Поиск номера {plate}...")
+        return await _process_plate(update, context, plate)
+
+    async def handle_plate_wrong(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """User says detected plate is wrong — prompt manual entry."""
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text("Введите номер вручную:")
+        return ENTERING_PLATE
+
+    async def handle_manual_plate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """User typed a plate number manually."""
+        plate = update.message.text.strip()
+        return await _process_plate(update, context, plate)
+
+    async def handle_enter_plate_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """User pressed 'Enter plate' button — prompt for text."""
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text("Введите номер автомобиля:")
+        return ENTERING_PLATE
+
+    async def handle_cancel_no_plate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """User cancels after no-detection."""
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text("Ок.")
+        return ConversationHandler.END
+
+    async def handle_admin_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """User confirmed — forward photo + plate to admin group."""
+        query = update.callback_query
+        await query.answer()
+        plate = context.user_data.get("send_plate", "")
+        photo_file_id = context.user_data.get("photo_file_id", "")
         user_identifier = _resolve_user_identifier(update)
 
-        # Prepare the caption with user info
-        original_caption = message.caption or ""
-        if original_caption:
-            new_caption = f"📩 От: {user_identifier}\n\n{original_caption}"
+        caption = f"📩 От: {user_identifier}\n\nОбнаруженный номер: {plate}"
+        if photo_file_id:
+            await context.bot.send_photo(
+                chat_id=target_group_id,
+                photo=photo_file_id,
+                caption=caption,
+            )
         else:
-            new_caption = f"📩 От: {user_identifier}"
+            await context.bot.send_message(
+                chat_id=target_group_id,
+                text=caption,
+            )
 
-        # Copy the message to the target group with modified caption
-        await message.copy(chat_id=target_group_id, caption=new_caption)
+        await query.edit_message_text("Фото отправлено в группу разбора.")
+        return ConversationHandler.END
 
-        await update.message.reply_text(MSG_PHOTO_FORWARDED)
+    async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """User declined to forward to admin group."""
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text("Ок.")
+        return ConversationHandler.END
+
+    async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """User cancelled the conversation with /cancel."""
+        await update.message.reply_text("Диалог отменён.")
+        return ConversationHandler.END
 
     # --- Register handlers ---
     application.add_handler(CommandHandler("start", start))
@@ -203,7 +354,27 @@ def register_handlers(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
     )
 
-    # Photo handler (with or without caption)
-    application.add_handler(
-        MessageHandler(filters.PHOTO, handle_photo)
+    # Photo + OCR ConversationHandler (replaces old handle_photo)
+    conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.PHOTO, handle_photo_detection)],
+        states={
+            CONFIRMING_PLATE: [
+                CallbackQueryHandler(handle_plate_confirmed, pattern="^confirm_plate$"),
+                CallbackQueryHandler(handle_plate_wrong, pattern="^wrong_plate$"),
+                MessageHandler(filters.PHOTO, handle_photo_detection),
+            ],
+            ENTERING_PLATE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manual_plate),
+                CallbackQueryHandler(handle_enter_plate_prompt, pattern="^enter_plate$"),
+                CallbackQueryHandler(handle_cancel_no_plate, pattern="^cancel_no_plate$"),
+                MessageHandler(filters.PHOTO, handle_photo_detection),
+            ],
+            CONFIRMING_SEND: [
+                CallbackQueryHandler(handle_admin_confirm, pattern="^confirm_send$"),
+                CallbackQueryHandler(handle_admin_cancel, pattern="^cancel_send$"),
+                MessageHandler(filters.PHOTO, handle_photo_detection),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
     )
+    application.add_handler(conv_handler)
