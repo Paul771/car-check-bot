@@ -57,6 +57,28 @@ HIGH_CONFIDENCE = 0.8
 LOW_CONFIDENCE = 0.3
 
 
+# Latin letters used in Russian plates mapped to their Cyrillic display forms.
+_LATIN_TO_CYRILLIC = str.maketrans({
+    "A": "А",
+    "B": "В",
+    "E": "Е",
+    "K": "К",
+    "M": "М",
+    "H": "Н",
+    "O": "О",
+    "P": "Р",
+    "C": "С",
+    "T": "Т",
+    "Y": "У",
+    "X": "Х",
+})
+
+
+def _display_plate(plate: str) -> str:
+    """Convert plate to uppercase Cyrillic display form."""
+    return plate.strip().upper().translate(_LATIN_TO_CYRILLIC)
+
+
 def _resolve_user_identifier(update: Update) -> str:
     """Get user identifier: username if available, else first/last name, else ID."""
     user = update.effective_user
@@ -113,13 +135,13 @@ def register_handlers(
 
         if plate_cache.is_known(normalized):
             await update.effective_message.reply_text(
-                f"✅ Номер {plate} найден в базе данных!"
+                f"✅ Номер {_display_plate(plate)} найден в базе данных!"
             )
             return ConversationHandler.END
 
         context.user_data["send_plate"] = plate
         await update.effective_message.reply_text(
-            f"❌ Номер {plate} не найден в базе.\n\n"
+            f"❌ Номер {_display_plate(plate)} не найден в базе.\n\n"
             f"Отправить фото в группу разбора?",
             reply_markup=_send_to_admin_keyboard(),
         )
@@ -160,11 +182,11 @@ def register_handlers(
 
         if plate_cache.is_known(normalized):
             await update.message.reply_text(
-                MSG_FOUND.format(plate=user_input)
+                MSG_FOUND.format(plate=_display_plate(user_input))
             )
         else:
             await update.message.reply_text(
-                MSG_NOT_FOUND.format(plate=user_input)
+                MSG_NOT_FOUND.format(plate=_display_plate(user_input))
             )
 
     def _forward_to_admin_text(user_identifier: str, user_text: str) -> str:
@@ -216,12 +238,23 @@ def register_handlers(
 
         if plate_cache.is_known(normalized):
             await update.message.reply_text(
-                MSG_FOUND.format(plate=user_text)
+                MSG_FOUND.format(plate=_display_plate(user_text))
             )
-        else:
+            return
+
+        # If user recently sent a photo for OCR, redirect to send-to-admin flow
+        if context.user_data.get("photo_file_id"):
+            context.user_data["send_plate"] = user_text
             await update.message.reply_text(
-                MSG_NOT_FOUND.format(plate=user_text)
+                f"❌ Номер {_display_plate(user_text)} не найден в базе.\n\n"
+                f"Отправить фото в группу разбора?",
+                reply_markup=_send_to_admin_keyboard(),
             )
+            return
+
+        await update.message.reply_text(
+            MSG_NOT_FOUND.format(plate=_display_plate(user_text))
+        )
 
     async def handle_photo_detection(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Entry point for photo messages. Detect plate, branch by confidence."""
@@ -267,7 +300,7 @@ def register_handlers(
 
         context.user_data["detected_plate"] = plate
         await message.reply_text(
-            f"Похоже на номер: {plate} (уверенность: {confidence:.0%})\n"
+            f"Похоже на номер: {_display_plate(plate)} (уверенность: {confidence:.0%})\n"
             f"Подтвердите или введите правильный номер:",
             reply_markup=_confirm_plate_keyboard(),
         )
@@ -278,7 +311,7 @@ def register_handlers(
         query = update.callback_query
         await query.answer()
         plate = context.user_data.get("detected_plate", "")
-        await query.edit_message_text(f"Поиск номера {plate}...")
+        await query.edit_message_text(f"Поиск номера {_display_plate(plate)}...")
         return await _process_plate(update, context, plate)
 
     async def handle_plate_wrong(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -315,7 +348,7 @@ def register_handlers(
         photo_file_id = context.user_data.get("photo_file_id", "")
         user_identifier = _resolve_user_identifier(update)
 
-        caption = f"📩 От: {user_identifier}\n\nОбнаруженный номер: {plate}"
+        caption = f"📩 От: {user_identifier}\n\nОбнаруженный номер: {_display_plate(plate)}"
         if photo_file_id:
             await context.bot.send_photo(
                 chat_id=target_group_id,
@@ -346,7 +379,7 @@ def register_handlers(
         photo_file_id = context.user_data.get("photo_file_id", "")
         user_identifier = _resolve_user_identifier(update)
 
-        caption = f"📩 От: {user_identifier}\n\nОбнаруженный номер: {plate}"
+        caption = f"📩 От: {user_identifier}\n\nОбнаруженный номер: {_display_plate(plate)}"
         if photo_file_id:
             await context.bot.send_photo(
                 chat_id=target_group_id,
