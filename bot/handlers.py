@@ -338,6 +338,30 @@ def register_handlers(
         await query.edit_message_text("Ок.")
         return ConversationHandler.END
 
+    async def handle_admin_confirm_by_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """User sent a photo in CONFIRMING_SEND — forward original photo + plate to admin."""
+        if not is_private_chat(update):
+            return ConversationHandler.END
+        plate = context.user_data.get("send_plate", "")
+        photo_file_id = context.user_data.get("photo_file_id", "")
+        user_identifier = _resolve_user_identifier(update)
+
+        caption = f"📩 От: {user_identifier}\n\nОбнаруженный номер: {plate}"
+        if photo_file_id:
+            await context.bot.send_photo(
+                chat_id=target_group_id,
+                photo=photo_file_id,
+                caption=caption,
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=target_group_id,
+                text=caption,
+            )
+
+        await update.message.reply_text("Фото отправлено в группу разбора.")
+        return ConversationHandler.END
+
     async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """User cancelled the conversation with /cancel."""
         await update.message.reply_text("Диалог отменён.")
@@ -367,12 +391,11 @@ def register_handlers(
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manual_plate),
                 CallbackQueryHandler(handle_enter_plate_prompt, pattern="^enter_plate$"),
                 CallbackQueryHandler(handle_cancel_no_plate, pattern="^cancel_no_plate$"),
-                MessageHandler(filters.PHOTO, handle_photo_detection),
             ],
             CONFIRMING_SEND: [
                 CallbackQueryHandler(handle_admin_confirm, pattern="^confirm_send$"),
                 CallbackQueryHandler(handle_admin_cancel, pattern="^cancel_send$"),
-                MessageHandler(filters.PHOTO, handle_photo_detection),
+                MessageHandler(filters.PHOTO, handle_admin_confirm_by_photo),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel_conversation)],

@@ -19,7 +19,7 @@ async def detect_plate(image_bytes: bytes, api_token: str) -> list[dict] | None:
                 PLATE_RECOGNIZER_URL,
                 headers={"Authorization": f"Token {api_token}"},
                 files={"upload": ("image.jpg", image_bytes, "image/jpeg")},
-                data={"regions": ["ru"]},
+                data={"regions": ["ru"], "config": '{"region":"strict"}'},
             )
             response.raise_for_status()
             data = response.json()
