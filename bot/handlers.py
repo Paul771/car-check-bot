@@ -312,25 +312,15 @@ def register_handlers(
 
             result = results[0]
             plate = result.get("plate", "")
-            raw = result.get("confidence") or result.get("oscore") or 0.0
-            if raw == 0.0:
-                logger.info("PR result[0] keys: %s raw=%s", list(result.keys()), raw)
             try:
+                raw = result.get("score") or result.get("confidence") or result.get("oscore") or 0.0
                 confidence = float(raw)
             except (ValueError, TypeError):
                 confidence = 0.0
             if confidence >= 1.0:
                 confidence /= 100.0
 
-            logger.info("PR result[0]: plate=%s confidence=%s", plate, confidence)
-
-            if confidence == 0.0:
-                await message.reply_text(
-                    f"🔍 Отладка: API вернуло ключи: {list(result.keys())}\n"
-                    f"Значение 'confidence': {result.get('confidence')!r}\n"
-                    f"Значение 'oscore': {result.get('oscore')!r}\n"
-                    f"Все поля: {dict((k, repr(v)[:80]) for k, v in result.items())}"
-                )
+            logger.info("PR result[0]: plate=%s score=%s", plate, confidence)
 
             if confidence >= HIGH_CONFIDENCE:
                 await _search_and_maybe_offer_send(update, context, plate)
