@@ -10,6 +10,7 @@ class Config:
     sheet_name: str
     column_index: int
     plate_recognizer_token: str = ""
+    plate_recognizer_confidence: float = 0.97
 
 
 def _parse_column_index(raw: str | None) -> int:
@@ -36,6 +37,14 @@ def load_config() -> Config:
 
     plate_recognizer_token = os.getenv("PLATE_RECOGNIZER_API_KEY", "")
 
+    raw_confidence = os.getenv("PLATE_RECOGNIZER_CONFIDENCE", "0.97")
+    try:
+        plate_recognizer_confidence = float(raw_confidence)
+    except ValueError:
+        plate_recognizer_confidence = 0.97
+    if not (0.0 <= plate_recognizer_confidence <= 1.0):
+        plate_recognizer_confidence = 0.97
+
     if not bot_token:
         raise ValueError("BOT_TOKEN environment variable is required but not set.")
     if target_group_id == 0:
@@ -47,4 +56,5 @@ def load_config() -> Config:
         sheet_name=sheet_name,
         column_index=column_index,
         plate_recognizer_token=plate_recognizer_token,
+        plate_recognizer_confidence=plate_recognizer_confidence,
     )
