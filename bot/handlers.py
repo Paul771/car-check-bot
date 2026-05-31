@@ -112,6 +112,9 @@ def register_handlers(
                 MSG_NOT_FOUND.format(plate=user_input)
             )
 
+    def _forward_to_admin_text(user_identifier: str, user_text: str) -> str:
+        return f"📩 Текстовое сообщение\nОт: {user_identifier}\n\n{user_text}"
+
     async def cmd_send_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /send_admin <text> command — forward text message to target group."""
         if not is_private_chat(update):
@@ -123,17 +126,12 @@ def register_handlers(
             await update.message.reply_text(MSG_SEND_ADMIN_PROMPT)
             return
 
-        await _forward_to_admin(update, " ".join(args).strip(), target_group_id)
-        await update.message.reply_text(MSG_SENT_ADMIN)
-
-    async def _forward_to_admin(update: Update, user_text: str, target_group_id: int):
-        """Forward text message to the target group."""
         user_identifier = _resolve_user_identifier(update)
-        message_to_group = f"📩 Текстовое сообщение\nОт: {user_identifier}\n\n{user_text}"
-        await update.message.bot.send_message(
+        await context.bot.send_message(
             chat_id=target_group_id,
-            text=message_to_group,
+            text=_forward_to_admin_text(user_identifier, " ".join(args).strip()),
         )
+        await update.message.reply_text(MSG_SENT_ADMIN)
 
     async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_private_chat(update):
@@ -146,7 +144,11 @@ def register_handlers(
 
         # Check if user is responding to /send_admin prompt
         if context.user_data.pop("awaiting_admin_text", False):
-            await _forward_to_admin(update, user_text, target_group_id)
+            user_identifier = _resolve_user_identifier(update)
+            await context.bot.send_message(
+                chat_id=target_group_id,
+                text=_forward_to_admin_text(user_identifier, user_text),
+            )
             await update.message.reply_text(MSG_SENT_ADMIN)
             return
 
