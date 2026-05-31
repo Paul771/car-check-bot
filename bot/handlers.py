@@ -293,14 +293,16 @@ def register_handlers(
 
         result = results[0]
         plate = result.get("plate", "")
-        confidence = result.get("confidence", 0.0)
+        confidence = result.get("oscore") or result.get("confidence") or 0.0
+        if confidence >= 1.0:
+            confidence /= 100.0
 
         if confidence >= HIGH_CONFIDENCE:
             return await _process_plate(update, context, plate)
 
         context.user_data["detected_plate"] = plate
         await message.reply_text(
-            f"Похоже на номер: {_display_plate(plate)} (уверенность: {confidence:.0%})\n"
+            f"Похоже на номер: {_display_plate(plate)} (уверенность: {confidence:.1%})\n"
             f"Подтвердите или введите правильный номер:",
             reply_markup=_confirm_plate_keyboard(),
         )
@@ -311,14 +313,20 @@ def register_handlers(
         query = update.callback_query
         await query.answer()
         plate = context.user_data.get("detected_plate", "")
-        await query.edit_message_text(f"Поиск номера {_display_plate(plate)}...")
+        await _safe_edit(query, f"Поиск номера {_display_plate(plate)}...")
         return await _process_plate(update, context, plate)
+
+    async def _safe_edit(query, text: str):
+        try:
+            await query.edit_message_text(text)
+        except Exception:
+            pass
 
     async def handle_plate_wrong(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """User says detected plate is wrong — prompt manual entry."""
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("Введите номер вручную:")
+        await _safe_edit(query, "Введите номер вручную:")
         return ENTERING_PLATE
 
     async def handle_manual_plate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -330,14 +338,14 @@ def register_handlers(
         """User pressed 'Enter plate' button — prompt for text."""
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("Введите номер автомобиля:")
+        await _safe_edit(query, "Введите номер автомобиля:")
         return ENTERING_PLATE
 
     async def handle_cancel_no_plate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """User cancels after no-detection."""
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("Ок.")
+        await _safe_edit(query, "Ок.")
         return ConversationHandler.END
 
     async def handle_admin_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -361,39 +369,25 @@ def register_handlers(
                 text=caption,
             )
 
-        await query.edit_message_text("Фото отправлено в группу разбора.")
+        await _safe_edit(query, "Фото отправлено в группу разбора.")
+        context.user_data.pop("photo_file_id", None)
+        context.user_data.pop("send_plate", None)
         return ConversationHandler.END
 
     async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """User declined to forward to admin group."""
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("Ок.")
+        await _safe_edit(query, "Ок.")
+        context.user_data.pop("photo_file_id", None)
+        context.user_data.pop("send_plate", None)
         return ConversationHandler.END
 
     async def handle_admin_confirm_by_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """User sent a photo in CONFIRMING_SEND — forward original photo + plate to admin."""
-        if not is_private_chat(update):
-            return ConversationHandler.END
-        plate = context.user_data.get("send_plate", "")
-        photo_file_id = context.user_data.get("photo_file_id", "")
-        user_identifier = _resolve_user_identifier(update)
-
-        caption = f"📩 От: {user_identifier}\n\nОбнаруженный номер: {_display_plate(plate)}"
-        if photo_file_id:
-            await context.bot.send_photo(
-                chat_id=target_group_id,
-                photo=photo_file_id,
-                caption=caption,
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=target_group_id,
-                text=caption,
-            )
-
-        await update.message.reply_text("Фото отправлено в группу разбора.")
-        return ConversationHandler.END
+        """User sent a photo in CONFIRMING_SEND — restart detection with new photo."""
+        context.user_data.pop("photo_file_id", None)
+        context.user_data.pop("send_plate", None)
+        return await handle_photo_detection(update, context)
 
     async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """User cancelled the conversation with /cancel."""
@@ -447,14 +441,14 @@ def register_handlers(
             await context.bot.send_photo(chat_id=target_group_id, photo=photo_file_id, caption=caption)
         else:
             await context.bot.send_message(chat_id=target_group_id, text=caption)
-        await query.edit_message_text("Фото отправлено в группу разбора.")
+        await _safe_edit(query, "Фото отправлено в группу разбора.")
         context.user_data.pop("photo_file_id", None)
         context.user_data.pop("send_plate", None)
 
     async def _standalone_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-        await query.edit_message_text("Ок.")
+        await _safe_edit(query, "Ок.")
         context.user_data.pop("photo_file_id", None)
         context.user_data.pop("send_plate", None)
 
