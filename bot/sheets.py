@@ -57,19 +57,43 @@ def load_plate_numbers(config: Config) -> set[str]:
     csv_text = fetch_sheet_csv(config)
     reader = csv.reader(io.StringIO(csv_text))
 
+    # Skip header row
+    next(reader, None)
+
     plates = set()
     col_idx = config.column_index - 1  # 1-based to 0-based
 
-    for row_num, row in enumerate(reader, start=1):
+    for row in reader:
         if col_idx < len(row):
-            val = row[col_idx].strip().upper()
+            val = normalize_plate(row[col_idx])
             if val:
                 plates.add(val)
 
-    logger.info(f"Loaded {len(plates)} plate numbers from sheet (excl. header).")
+    logger.info(f"Loaded {len(plates)} plate numbers from sheet.")
     return plates
 
 
+# Cyrillic letters that look identical to Latin letters in Russian plates.
+# Normalize everything to Latin so both scripts match the same lookup.
+_CYRILLIC_TO_LATIN = str.maketrans({
+    "\u0410": "A",  # А → A
+    "\u0412": "B",  # В → B
+    "\u0415": "E",  # Е → E
+    "\u041A": "K",  # К → K
+    "\u041C": "M",  # М → M
+    "\u041D": "H",  # Н → H
+    "\u041E": "O",  # О → O
+    "\u0420": "P",  # Р → P
+    "\u0421": "C",  # С → C
+    "\u0422": "T",  # Т → T
+    "\u0423": "Y",  # У → Y
+    "\u0425": "X",  # Х → X
+})
+
+
 def normalize_plate(text: str) -> str:
-    """Normalize a plate number for comparison."""
-    return text.strip().upper()
+    """Normalize a plate number for comparison.
+    Handles Cyrillic/Latin character ambiguity (e.g. А vs A, Х vs X, У vs Y).
+    All ambiguous Cyrillic letters are converted to their Latin equivalents.
+    """
+    return text.strip().upper().translate(_CYRILLIC_TO_LATIN)
