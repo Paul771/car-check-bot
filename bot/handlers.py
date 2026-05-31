@@ -43,6 +43,7 @@ MSG_NOT_FOUND = (
 )
 MSG_PHOTO_FORWARDED = "Сообщение передано в группу разбора."
 MSG_SENT_ADMIN = "Текстовое сообщение передано в группу разбора."
+MSG_SEND_ADMIN_PROMPT = "Напишите текст сообщения для отправки в группу разбора:"
 MSG_PLATE_COUNT = "В базе данных {count} номеров."
 
 
@@ -118,23 +119,21 @@ def register_handlers(
 
         args = context.args
         if not args:
-            await update.message.reply_text(
-                "Использование: /send_admin <текст>\n"
-                "Пример: /send_admin Машина припаркована у подъезда"
-            )
+            context.user_data["awaiting_admin_text"] = True
+            await update.message.reply_text(MSG_SEND_ADMIN_PROMPT)
             return
 
-        user_text = " ".join(args).strip()
+        await _forward_to_admin(update, " ".join(args).strip(), target_group_id)
+        await update.message.reply_text(MSG_SENT_ADMIN)
+
+    async def _forward_to_admin(update: Update, user_text: str, target_group_id: int):
+        """Forward text message to the target group."""
         user_identifier = _resolve_user_identifier(update)
-
         message_to_group = f"📩 Текстовое сообщение\nОт: {user_identifier}\n\n{user_text}"
-
-        await context.bot.send_message(
+        await update.message.bot.send_message(
             chat_id=target_group_id,
             text=message_to_group,
         )
-
-        await update.message.reply_text(MSG_SENT_ADMIN)
 
     async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_private_chat(update):
@@ -143,6 +142,12 @@ def register_handlers(
 
         # Ignore commands
         if user_text.startswith("/"):
+            return
+
+        # Check if user is responding to /send_admin prompt
+        if context.user_data.pop("awaiting_admin_text", False):
+            await _forward_to_admin(update, user_text, target_group_id)
+            await update.message.reply_text(MSG_SENT_ADMIN)
             return
 
         normalized = normalize_plate(user_text)
