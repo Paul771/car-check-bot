@@ -406,6 +406,32 @@ def register_handlers(
     application.add_handler(CommandHandler("find", cmd_find))
     application.add_handler(CommandHandler("send_admin", cmd_send_admin))
 
+    # Standalone callbacks for send-to-admin buttons (when no active conversation)
+    async def _standalone_admin_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        plate = context.user_data.get("send_plate", "")
+        photo_file_id = context.user_data.get("photo_file_id", "")
+        user_identifier = _resolve_user_identifier(update)
+        caption = f"📩 От: {user_identifier}\n\nОбнаруженный номер: {_display_plate(plate)}"
+        if photo_file_id:
+            await context.bot.send_photo(chat_id=target_group_id, photo=photo_file_id, caption=caption)
+        else:
+            await context.bot.send_message(chat_id=target_group_id, text=caption)
+        await query.edit_message_text("Фото отправлено в группу разбора.")
+        context.user_data.pop("photo_file_id", None)
+        context.user_data.pop("send_plate", None)
+
+    async def _standalone_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        await query.edit_message_text("Ок.")
+        context.user_data.pop("photo_file_id", None)
+        context.user_data.pop("send_plate", None)
+
+    application.add_handler(CallbackQueryHandler(_standalone_admin_confirm, pattern="^confirm_send$"))
+    application.add_handler(CallbackQueryHandler(_standalone_admin_cancel, pattern="^cancel_send$"))
+
     # Text handler (but not commands, not photos)
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
