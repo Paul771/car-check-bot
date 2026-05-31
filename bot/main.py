@@ -96,7 +96,7 @@ async def run_bot_async() -> int:
     application.add_error_handler(error_handler)
 
     logger.info("Registering handlers...")
-    register_handlers(application, plate_cache, config.target_group_id)
+    register_handlers(application, plate_cache, config.target_group_id, config)
 
     logger.info("Starting bot polling manually...")
     try:
