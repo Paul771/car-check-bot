@@ -19,10 +19,11 @@ async def detect_plate(image_bytes: bytes, api_token: str) -> list[dict] | None:
                 PLATE_RECOGNIZER_URL,
                 headers={"Authorization": f"Token {api_token}"},
                 files={"upload": ("image.jpg", image_bytes, "image/jpeg")},
-                data={"regions": ["ru"], "config": '{"region":"strict"}'},
+                data={"regions": ["ru"]},
             )
             response.raise_for_status()
             data = response.json()
+            logger.info("Plate Recognizer API response: %s", data)
             return data.get("results", [])
     except Exception as e:
         logger.warning(f"Plate Recognizer API error: {e}", exc_info=True)

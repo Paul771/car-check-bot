@@ -1,3 +1,5 @@
+import logging
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     CommandHandler,
@@ -9,6 +11,9 @@ from telegram.ext import (
 from bot.utils import PlateCache
 from bot.sheets import normalize_plate
 from bot.plate_recognizer import detect_plate
+
+
+logger = logging.getLogger(__name__)
 
 
 # Constants / Messages
@@ -277,49 +282,61 @@ def register_handlers(
         """Entry point for photo messages. Detect plate, branch by confidence."""
         if not is_private_chat(update):
             return
+        _cleanup_plate_context(context)
+        try:
+            message = update.message
+            photo_file = message.photo[-1]
 
-        message = update.message
-        photo_file = message.photo[-1]
+            file = await context.bot.get_file(photo_file.file_id)
+            image_bytes = await file.download_as_bytearray()
 
-        file = await context.bot.get_file(photo_file.file_id)
-        image_bytes = await file.download_as_bytearray()
+            context.user_data["photo_file_id"] = photo_file.file_id
 
-        context.user_data["photo_file_id"] = photo_file.file_id
-
-        results = await detect_plate(
-            bytes(image_bytes), config.plate_recognizer_token
-        )
-
-        if results is None:
-            await message.reply_text(
-                "Сервис распознавания временно недоступен. "
-                "Попробуйте позже или используйте /send_admin."
+            results = await detect_plate(
+                bytes(image_bytes), config.plate_recognizer_token
             )
-            return
 
-        if not results:
+            if results is None:
+                await message.reply_text(
+                    "Сервис распознавания временно недоступен. "
+                    "Попробуйте позже или используйте /send_admin."
+                )
+                return
+
+            if not results:
+                await message.reply_text(
+                    "Не удалось распознать номер на фото.",
+                    reply_markup=_no_detection_keyboard(),
+                )
+                return
+
+            result = results[0]
+            plate = result.get("plate", "")
+            raw = result.get("confidence") or result.get("oscore") or 0.0
+            try:
+                confidence = float(raw)
+            except (ValueError, TypeError):
+                confidence = 0.0
+            if confidence >= 1.0:
+                confidence /= 100.0
+
+            logger.info("PR result[0]: plate=%s confidence=%s", plate, confidence)
+
+            if confidence >= HIGH_CONFIDENCE:
+                await _search_and_maybe_offer_send(update, context, plate)
+                return
+
+            context.user_data["detected_plate"] = plate
             await message.reply_text(
-                "Не удалось распознать номер на фото.",
-                reply_markup=_no_detection_keyboard(),
+                f"Похоже на номер: {_display_plate(plate)} (уверенность: {confidence:.1%})\n"
+                f"Подтвердите или введите правильный номер:",
+                reply_markup=_confirm_plate_keyboard(),
             )
-            return
-
-        result = results[0]
-        plate = result.get("plate", "")
-        confidence = result.get("oscore") or result.get("confidence") or 0.0
-        if confidence >= 1.0:
-            confidence /= 100.0
-
-        if confidence >= HIGH_CONFIDENCE:
-            await _search_and_maybe_offer_send(update, context, plate)
-            return
-
-        context.user_data["detected_plate"] = plate
-        await message.reply_text(
-            f"Похоже на номер: {_display_plate(plate)} (уверенность: {confidence:.1%})\n"
-            f"Подтвердите или введите правильный номер:",
-            reply_markup=_confirm_plate_keyboard(),
-        )
+        except Exception:
+            logger.exception("handle_photo_detection crashed")
+            await update.effective_message.reply_text(
+                "Произошла ошибка при обработке фото. Попробуйте ещё раз."
+            )
 
     async def handle_plate_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """User confirms the detected plate is correct."""
@@ -358,19 +375,22 @@ def register_handlers(
         user_identifier = _resolve_user_identifier(update)
 
         caption = f"📩 От: {user_identifier}\n\nОбнаруженный номер: {_display_plate(plate)}"
-        if photo_file_id:
-            await context.bot.send_photo(
-                chat_id=target_group_id,
-                photo=photo_file_id,
-                caption=caption,
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=target_group_id,
-                text=caption,
-            )
-
-        await _safe_edit(query, "Фото отправлено в группу разбора.")
+        try:
+            if photo_file_id:
+                await context.bot.send_photo(
+                    chat_id=target_group_id,
+                    photo=photo_file_id,
+                    caption=caption,
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=target_group_id,
+                    text=caption,
+                )
+            await _safe_edit(query, "Фото отправлено в группу разбора.")
+        except Exception as e:
+            logger.error("Send to admin failed: %s", e)
+            await _safe_edit(query, "Ошибка отправки в группу разбора.")
         _cleanup_plate_context(context)
 
     async def handle_admin_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
