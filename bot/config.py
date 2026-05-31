@@ -9,6 +9,7 @@ class Config:
     google_sheet_id: str
     sheet_name: str
     column_index: int
+    plate_recognizer_token: str = ""
 
 
 def _parse_column_index(raw: str | None) -> int:
@@ -33,6 +34,8 @@ def load_config() -> Config:
     sheet_name = os.getenv("SHEET_NAME", "Sheet1")
     column_index = _parse_column_index(os.getenv("COLUMN_INDEX"))
 
+    plate_recognizer_token = os.getenv("PLATE_RECOGNIZER_API_KEY", "")
+
     if not bot_token:
         raise ValueError("BOT_TOKEN environment variable is required but not set.")
     if target_group_id == 0:
@@ -43,4 +46,5 @@ def load_config() -> Config:
         google_sheet_id=google_sheet_id,
         sheet_name=sheet_name,
         column_index=column_index,
+        plate_recognizer_token=plate_recognizer_token,
     )
